@@ -5,27 +5,56 @@ from datetime import datetime
 from pygame import mixer
 import json
 import os
+import platform
 
-# Get script directory for leaderboard file
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LEADERBOARD_FILE = os.path.join(SCRIPT_DIR, "brick_breaker_leaderboard.json")
-
+# Initialize pygame early for sound/mixer
+pygame.init()
 pygame.mixer.init()
 
-bounce_soundpath = os.path.join(SCRIPT_DIR, "bounce.wav")
-explosion_soundpath = os.path.join(SCRIPT_DIR, "explosion.wav")
-bgm_soundpath = os.path.join(SCRIPT_DIR, "brick_breaker_bgm.wav")
+# Determine the correct paths for data files
+def get_data_path(filename):
+    # If we're running as a PyInstaller bundle
+    if getattr(sys, 'frozen', False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    
+    return os.path.join(base_path, filename)
 
-bounce_sound = pygame.mixer.Sound(bounce_soundpath)
-explosion_sound = pygame.mixer.Sound(explosion_soundpath)
+def get_writable_path(filename):
+    # Get appropriate writable location based on OS
+    if platform.system() == "Windows":
+        appdata = os.getenv('APPDATA')
+        save_dir = os.path.join(appdata, 'BrickBreaker')
+    else:  # Linux/Mac
+        home = os.path.expanduser("~")
+        save_dir = os.path.join(home, '.brickbreaker')
+    
+    os.makedirs(save_dir, exist_ok=True)
+    return os.path.join(save_dir, filename)
 
-powerup_soundpath = os.path.join(SCRIPT_DIR, "powerup.wav") 
-powerup_sound = pygame.mixer.Sound(powerup_soundpath)
+# Sound files
+try:
+    bounce_sound = pygame.mixer.Sound(get_data_path("bounce.wav"))
+    explosion_sound = pygame.mixer.Sound(get_data_path("explosion.wav"))
+    powerup_sound = pygame.mixer.Sound(get_data_path("powerup.wav"))
+    intro_sound = pygame.mixer.Sound(get_data_path("intro_music.wav"))
+    bgm_sound = pygame.mixer.Sound(get_data_path("brick_breaker_bgm.wav"))
+except:
+    # Fallback if sound files aren't found
+    class DummySound:
+        def play(self): pass
+        def stop(self): pass
+        def set_volume(self, vol): pass
+    
+    bounce_sound = DummySound()
+    explosion_sound = DummySound()
+    powerup_sound = DummySound()
+    intro_sound = DummySound()
+    bgm_sound = DummySound()
 
-intro_soundpath = os.path.join(SCRIPT_DIR, "intro_music.wav") 
-
-# Initialize Pygame
-pygame.init()
+# Leaderboard file path
+LEADERBOARD_FILE = get_writable_path("brick_breaker_leaderboard.json")
 
 # Initialize Pygame with a maximized window
 info = pygame.display.Info()
@@ -62,8 +91,8 @@ class LeaderBoard:
         self.load_scores()
     
     def load_scores(self):
-        if os.path.exists(LEADERBOARD_FILE):
-            try:
+        try:
+            if os.path.exists(LEADERBOARD_FILE):
                 with open(LEADERBOARD_FILE, 'r') as f:
                     # Load scores and remove duplicates
                     loaded_scores = json.load(f)
@@ -83,18 +112,19 @@ class LeaderBoard:
                     # Sort and keep top 10
                     unique_scores.sort(key=lambda x: x['score'], reverse=True)
                     self.scores = unique_scores[:10]
-                    
-            except (json.JSONDecodeError, IOError):
-                # If file is corrupted, start fresh
-                self.scores = []
-        else:
-            # Create file if it doesn't exist
-            with open(LEADERBOARD_FILE, 'w') as f:
-                json.dump([], f)
+            else:
+                # Create file if it doesn't exist
+                self.save_scores()
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Error loading leaderboard: {e}")
+            self.scores = []
     
     def save_scores(self):
-        with open(LEADERBOARD_FILE, 'w') as f:
-            json.dump(self.scores, f, indent=4)  # Add indent for better readability
+        try:
+            with open(LEADERBOARD_FILE, 'w') as f:
+                json.dump(self.scores, f, indent=4)
+        except IOError as e:
+            print(f"Error saving leaderboard: {e}")
     
     def add_score(self, score, level):
         if score > 0:
@@ -131,6 +161,10 @@ class LeaderBoard:
     
     def get_high_score(self):
         return self.scores[0]['score'] if self.scores else 0
+    
+    def reset_scores(self):
+        self.scores = []
+        self.save_scores()
 
 class OptionsMenu:
     def __init__(self):
@@ -440,7 +474,7 @@ class Paddle:
         self.height = 15
         self.x = (SCREEN_WIDTH - self.width) // 2
         self.y = SCREEN_HEIGHT - 50
-        self.base_speed = 8  # Store base speed
+        self.base_speed = 10  # Store base speed
         self.speed = self.base_speed  # Current speed
         self.color = WHITE
     
@@ -478,12 +512,19 @@ class Ball:
         self.speed_increase_factor = 1.0  # Reset speed to normal
     
     def increase_speed(self):
-        """Increase the ball's speed up to the maximum"""
+        """Increase the ball's speed gradually, but keep it capped."""
         if self.speed_increase_factor < self.max_speed_multiplier:
-            self.speed_increase_factor += self.speed_increment
-            # Apply the speed increase to current velocity
-            self.dx = self.dx / abs(self.dx) * abs(self.dx) * self.speed_increase_factor
-            self.dy = self.dy / abs(self.dy) * abs(self.dy) * self.speed_increase_factor
+            self.speed_increase_factor = min(
+                self.max_speed_multiplier,
+                self.speed_increase_factor + self.speed_increment
+            )
+            # Normalize current direction
+            direction_x = 1 if self.dx > 0 else -1
+            direction_y = 1 if self.dy > 0 else -1
+            base_speed = 4  # your normal starting speed per axis
+            self.dx = direction_x * base_speed * self.speed_increase_factor
+            self.dy = direction_y * base_speed * self.speed_increase_factor
+
     
     def draw(self, surface):
         color = RED if self.manual_control else WHITE  # Change color when in manual mode
@@ -867,9 +908,9 @@ class LogoScreen:
     def load_logos(self):
         # Try to load multiple logo images
         logo_paths = [
-            os.path.join(SCRIPT_DIR, "DD Lab1.png"),
-            (os.path.join(SCRIPT_DIR, "logo1.png"), os.path.join(SCRIPT_DIR, "logo2.jpg")),
-            os.path.join(SCRIPT_DIR, "brick_breaker.jpg")
+            get_data_path("DD Lab1.png"),
+            (get_data_path("logo1.png"), get_data_path("logo2.jpg")),
+            get_data_path("brick_breaker.jpg")
         ]
         
         for item in logo_paths:
@@ -1432,7 +1473,7 @@ class Game:
         try:
             # Load BGM if not already loaded
             if not hasattr(self, 'bgm') or self.bgm is None:
-                self.bgm = pygame.mixer.Sound(bgm_soundpath)
+                self.bgm = pygame.mixer.Sound(bgm_sound)
             self.bgm.set_volume(0 if self.muted else self.bgm_volume)
 
         except Exception as e:
@@ -1706,7 +1747,7 @@ class Game:
                 new_record_text = small_font.render('NEW HIGH SCORE!', True, YELLOW)
                 surface.blit(new_record_text, new_record_text.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT//2 - 80)))
             
-            restart_text = small_font.render('Press Space to Continue or Click Here', True, WHITE)
+            restart_text = small_font.render('Press Space to Continue', True, WHITE)
             restart_rect = restart_text.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT//2 + 70))
             surface.blit(restart_text, restart_rect)
             
@@ -1761,19 +1802,19 @@ def show_exit_credits():
     # Stop any currently playing sounds
     pygame.mixer.stop()
     
-    # Load outro music (replace with your actual file path)
-    outro_music_path = os.path.join(SCRIPT_DIR, "outro_music.wav")  # or .ogg
+    # Load outro music
+    outro_music_path = get_data_path("outro_music.wav")
     try:
         outro_music = pygame.mixer.Sound(outro_music_path)
-        outro_music.set_volume(0.7)  # Adjust volume as needed
-        outro_music.play(loops=-1)  # Loop indefinitely
+        outro_music.set_volume(0.7)
+        outro_music.play(loops=-1)
     except:
         outro_music = None
     
     # Initialize parameters
     rolling_text_y = SCREEN_HEIGHT  # Start below screen
     rolling_text_speed = 2  # Pixels per frame
-    total_duration = 14000  # 14 seconds total (can adjust as needed)
+    total_duration = 14000  # 14 seconds total
     start_time = pygame.time.get_ticks()
     
     # Define credits content
@@ -1879,9 +1920,9 @@ def main():
         
         # Load and play intro music
         try:
-            intro_music = pygame.mixer.Sound(intro_soundpath)
+            intro_music = pygame.mixer.Sound(get_data_path("intro_music.wav"))
             intro_music.set_volume(1.0)
-            intro_music.play(loops=-1)  # Loop indefinitely
+            intro_music.play(loops=-1)
         except:
             intro_music = None
         
@@ -1957,7 +1998,7 @@ def main():
                 # Stop any game music and play intro music again
                 game.stop_bgm()
                 try:
-                    intro_music = pygame.mixer.Sound(intro_soundpath)
+                    intro_music = pygame.mixer.Sound(get_data_path("intro_music.wav"))
                     intro_music.set_volume(0.7)
                     intro_music.play(loops=-1)
                 except:
@@ -2015,6 +2056,7 @@ def main():
         sys.exit()
 
     except Exception as e:
+        print(f"Error: {e}")
         pygame.quit()
         sys.exit()
 
